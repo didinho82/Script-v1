@@ -1,0 +1,577 @@
+print("[Manus Explorer] Iniciando carregamento do script...")
+
+local Rayfield
+local RAYFIELD_URL = "https://sirius.menu/rayfield"
+
+-- Tentar obter o código da biblioteca Rayfield
+local httpGetSuccess, rayfieldCode = pcall(function()
+    return game:HttpGet(RAYFIELD_URL, true)
+end)
+
+if not httpGetSuccess or not rayfieldCode or rayfieldCode == "" then
+    warn("[Manus Explorer] Erro: Falha ao obter o código da biblioteca Rayfield. URL: " .. RAYFIELD_URL .. ", Erro: " .. tostring(rayfieldCode or httpGetSuccess))
+    return
+end
+
+print("[Manus Explorer] Código Rayfield obtido. Tentando carregar loadstring...")
+
+-- Tentar carregar a biblioteca Rayfield via loadstring
+local loadstringSuccess, loadedRayfield = pcall(function()
+    return loadstring(rayfieldCode)()
+end)
+
+if loadstringSuccess and loadedRayfield then
+    Rayfield = loadedRayfield
+    print("[Manus Explorer] Biblioteca Rayfield carregada com sucesso.")
+else
+    warn("[Manus Explorer] Erro crítico ao carregar Rayfield via loadstring: " .. tostring(loadedRayfield))
+    return
+end
+
+print("[Manus Explorer] Criando janela principal...")
+local Window
+local windowSuccess, windowResult = pcall(function()
+    return Rayfield:CreateWindow({
+        Name = "Manus Explorer v1.2",
+        Icon = 0,
+        LoadingTitle = "Manus Explorer",
+        LoadingSubtitle = "Preparando Interface...",
+        Theme = "Default",
+        ToggleUIKeybind = "RightControl", -- Tecla para alternar a visibilidade da UI
+        ConfigurationSaving = {
+            Enabled = false -- Desativado temporariamente para evitar erros de escrita de arquivo
+        },
+        KeySystem = false
+    })
+end)
+
+if not windowSuccess or not windowResult then
+    warn("[Manus Explorer] Erro ao criar janela Rayfield: " .. tostring(windowResult))
+    return
+end
+Window = windowResult
+print("[Manus Explorer] Janela principal criada com sucesso.")
+
+print("[Manus Explorer] Criando abas...")
+
+-- Função segura para criar abas
+local function safeCreateTab(name, icon)
+    local tabSuccess, tab = pcall(function()
+        return Window:CreateTab(name, icon)
+    end)
+    if tabSuccess and tab then
+        print("[Manus Explorer] Aba criada: " .. name)
+        return tab
+    else
+        warn("[Manus Explorer] Falha ao criar aba " .. name .. ": " .. tostring(tab))
+        return nil
+    end
+end
+
+local ExplorerTab = safeCreateTab("Explorer", "folder")
+local PropertiesTab = safeCreateTab("Properties", "settings")
+local ScriptsTab = safeCreateTab("Scripts", "file-text")
+local RemoteSpyTab = safeCreateTab("RemoteSpy", "eye")
+local SettingsTab = safeCreateTab("Settings", "gear")
+
+-- Seções iniciais
+local ExplorerSection = ExplorerTab and ExplorerTab:CreateSection("Hierarquia") or nil
+local SearchSection = ExplorerTab and ExplorerTab:CreateSection("Buscar Instância") or nil
+local ActionsSection = ExplorerTab and ExplorerTab:CreateSection("Ações Rápidas") or nil
+local PropertiesSection = PropertiesTab and PropertiesTab:CreateSection("Propriedades da Instância") or nil
+local ScriptsListSection = ScriptsTab and ScriptsTab:CreateSection("Scripts Encontrados") or nil
+local ScriptSourceSection = ScriptsTab and ScriptsTab:CreateSection("Código do Script") or nil
+local RemoteSpySection = RemoteSpyTab and RemoteSpyTab:CreateSection("Monitor de Remotes") or nil
+local SettingsSection = SettingsTab and SettingsTab:CreateSection("Configurações") or nil
+
+-- Variáveis globais para o explorador
+local currentInstance = game
+local explorerElements = {}
+local propertyElements = {}
+local searchInput = nil
+local remoteSpyLogs = {}
+local remoteSpyElements = {}
+local scriptElements = {}
+local currentScriptSourceLabel = nil
+local actionElements = {}
+
+-- Função para limpar uma seção
+local function clearSection(section, elementsTable)
+    if not section or not section.Container then return {} end
+    for _, element in pairs(elementsTable) do
+        pcall(function() element:Destroy() end)
+    end
+    for _, child in pairs(section.Container:GetChildren()) do
+        pcall(function()
+            if child:IsA("Frame") or child:IsA("TextLabel") or child:IsA("TextBox") or child:IsA("TextButton") then
+                child:Destroy()
+            end
+        end)
+    end
+    return {}
+end
+
+-- Função para atualizar as propriedades de uma instância selecionada
+local function updateProperties(instance)
+    if not PropertiesSection then return end
+    propertyElements = clearSection(PropertiesSection, propertyElements)
+
+    if not instance then return end
+
+    PropertiesSection:CreateLabel({Name = "Instância: " .. instance.Name .. " (" .. instance.ClassName .. ")"})
+    PropertiesSection:CreateLabel({Name = "Parent: " .. (instance.Parent and instance.Parent.Name or "nil")})
+
+    local propertiesToEdit = {
+        "Name", "Archivable", "CanCollide", "Transparency", "Anchored", "Locked",
+        "Position", "Size", "Color", "BrickColor", "Material", "Reflectance", "Transparency"
+    }
+
+    for _, propName in ipairs(propertiesToEdit) do
+        local success, value = pcall(function() return instance[propName] end)
+        if success then
+            local propType = typeof(value)
+            local displayValue = tostring(value)
+
+            if propType == "boolean" then
+                local toggle = PropertiesSection:CreateToggle({
+                    Name = propName,
+                    CurrentValue = value,
+                    Callback = function(newValue)
+                        pcall(function() instance[propName] = newValue end)
+                    end
+                })
+                table.insert(propertyElements, toggle)
+            elseif propType == "string" or propType == "number" then
+                local input = PropertiesSection:CreateInput({
+                    Name = propName,
+                    CurrentValue = tostring(value),
+                    PlaceholderText = "Editar " .. propName,
+                    Callback = function(newValueStr)
+                        local convertedValue = newValueStr
+                        if propType == "number" then
+                            convertedValue = tonumber(newValueStr)
+                            if not convertedValue then return end
+                        end
+                        pcall(function() instance[propName] = convertedValue end)
+                    end
+                })
+                table.insert(propertyElements, input)
+            elseif propType == "Color3" then
+                local colorPicker = PropertiesSection:CreateColorPicker({
+                    Name = propName,
+                    Color = value,
+                    Callback = function(newColor)
+                        pcall(function() instance[propName] = newColor end)
+                    end
+                })
+                table.insert(propertyElements, colorPicker)
+            elseif propType == "Vector3" then
+                PropertiesSection:CreateLabel({Name = propName .. ":"})
+                local inputX = PropertiesSection:CreateInput({
+                    Name = "X", CurrentValue = tostring(value.X), PlaceholderText = "X",
+                    Callback = function(newXStr)
+                        local newX = tonumber(newXStr)
+                        if newX then pcall(function() instance[propName] = Vector3.new(newX, value.Y, value.Z) end) end
+                    end
+                })
+                local inputY = PropertiesSection:CreateInput({
+                    Name = "Y", CurrentValue = tostring(value.Y), PlaceholderText = "Y",
+                    Callback = function(newYStr)
+                        local newY = tonumber(newYStr)
+                        if newY then pcall(function() instance[propName] = Vector3.new(value.X, newY, value.Z) end) end
+                    end
+                })
+                local inputZ = PropertiesSection:CreateInput({
+                    Name = "Z", CurrentValue = tostring(value.Z), PlaceholderText = "Z",
+                    Callback = function(newZStr)
+                        local newZ = tonumber(newZStr)
+                        if newZ then pcall(function() instance[propName] = Vector3.new(value.X, value.Y, newZ) end) end
+                    end
+                })
+                table.insert(propertyElements, inputX)
+                table.insert(propertyElements, inputY)
+                table.insert(propertyElements, inputZ)
+            else
+                PropertiesSection:CreateLabel({Name = propName .. ": " .. displayValue})
+            end
+        end
+    end
+end
+
+-- Função para atualizar as ações rápidas
+local function updateActions(instance)
+    if not ActionsSection then return end
+    actionElements = clearSection(ActionsSection, actionElements)
+
+    if not instance or instance == game then return end
+
+    local destroyButton = ActionsSection:CreateButton({
+        Name = "Destroy Instância",
+        Callback = function()
+            local success, err = pcall(function() instance:Destroy() end)
+            if success then
+                Rayfield:Notify({
+                    Title = "Sucesso", Content = "Instância destruída: " .. instance.Name, Duration = 3
+                })
+                currentInstance = game
+                updateHierarchy(game)
+                updateProperties(game)
+                updateActions(game)
+            else
+                Rayfield:Notify({
+                    Title = "Erro", Content = "Falha ao destruir: " .. (err or "Erro desconhecido"), Duration = 5
+                })
+            end
+        end
+    })
+    table.insert(actionElements, destroyButton)
+
+    local cloneButton = ActionsSection:CreateButton({
+        Name = "Clonar Instância",
+        Callback = function()
+            local success, clonedInstance = pcall(function() return instance:Clone() end)
+            if success and clonedInstance then
+                clonedInstance.Parent = game.Workspace
+                Rayfield:Notify({
+                    Title = "Sucesso", Content = "Instância clonada: " .. clonedInstance.Name, Duration = 3
+                })
+                updateHierarchy(currentInstance)
+            else
+                Rayfield:Notify({
+                    Title = "Erro", Content = "Falha ao clonar: " .. (clonedInstance or "Erro desconhecido"), Duration = 5
+                })
+            end
+        end
+    })
+    table.insert(actionElements, cloneButton)
+
+    local copyPathButton = ActionsSection:CreateButton({
+        Name = "Copiar Caminho",
+        Callback = function()
+            local path = instance:GetFullName()
+            local successClipboard, errClipboard = pcall(function() setclipboard(path) end)
+            if successClipboard then
+                Rayfield:Notify({
+                    Title = "Caminho Copiado", Content = path, Duration = 3
+                })
+            else
+                Rayfield:Notify({
+                    Title = "Erro", Content = "Falha ao copiar para a área de transferência: " .. (errClipboard or "Recurso não disponível."), Duration = 5
+                })
+            end
+        end
+    })
+    table.insert(actionElements, copyPathButton)
+end
+
+-- Função para atualizar a hierarquia
+local function updateHierarchy(instance)
+    if not ExplorerSection then return end
+    explorerElements = clearSection(ExplorerSection, explorerElements)
+
+    if instance.Parent then
+        local backButton = ExplorerSection:CreateButton({
+            Name = "<- Voltar para " .. instance.Parent.Name,
+            Callback = function()
+                currentInstance = instance.Parent
+                updateHierarchy(currentInstance)
+                updateProperties(currentInstance)
+                updateActions(currentInstance)
+            end
+        })
+        table.insert(explorerElements, backButton)
+    end
+
+    local children = instance:GetChildren()
+    for i = 1, math.min(#children, 200) do -- Aumentado limite para 200 para testes
+        local child = children[i]
+        local button = ExplorerSection:CreateButton({
+            Name = child.Name .. " (" .. child.ClassName .. ")",
+            Callback = function()
+                currentInstance = child
+                updateHierarchy(child)
+                updateProperties(child)
+                updateActions(child)
+            end
+        })
+        table.insert(explorerElements, button)
+    end
+end
+
+-- Função de busca
+local function searchInstances(searchText)
+    if not ExplorerSection then return end
+    explorerElements = clearSection(ExplorerSection, explorerElements)
+
+    if searchText == "" then
+        updateHierarchy(game)
+        updateProperties(game)
+        updateActions(game)
+        return
+    end
+
+    local foundInstances = {}
+    local function recursiveSearch(instance)
+        if instance.Name:lower():find(searchText:lower()) or instance.ClassName:lower():find(searchText:lower()) then
+            table.insert(foundInstances, instance)
+        end
+        for _, child in pairs(instance:GetChildren()) do
+            recursiveSearch(child)
+        end
+    end
+    recursiveSearch(game)
+
+    if #foundInstances > 0 then
+        for _, foundInstance in ipairs(foundInstances) do
+            local button = ExplorerSection:CreateButton({
+                Name = foundInstance.Name .. " (" .. foundInstance.ClassName .. ")",
+                Callback = function()
+                    currentInstance = foundInstance
+                    updateHierarchy(foundInstance)
+                    updateProperties(foundInstance)
+                    updateActions(foundInstance)
+                end
+            })
+            table.insert(explorerElements, button)
+        end
+    else
+        ExplorerSection:CreateLabel({Name = "Nenhuma instância encontrada."})
+    end
+end
+
+-- RemoteSpy Functions
+local function logRemoteCall(remote, direction, ...)
+    local args = {...}
+    local argStrings = {}
+    for i, v in ipairs(args) do
+        table.insert(argStrings, tostring(v))
+    end
+    local logEntry = string.format("[%s] %s %s: %s", os.date("%H:%M:%S"), direction, remote:GetFullName(), table.concat(argStrings, ", "))
+    table.insert(remoteSpyLogs, 1, logEntry)
+    if #remoteSpyLogs > 50 then
+        table.remove(remoteSpyLogs)
+    end
+    updateRemoteSpyDisplay()
+end
+
+local function updateRemoteSpyDisplay()
+    if not RemoteSpySection then return end
+    remoteSpyElements = clearSection(RemoteSpySection, remoteSpyElements)
+    for _, log in ipairs(remoteSpyLogs) do
+        local label = RemoteSpySection:CreateLabel({Name = log})
+        table.insert(remoteSpyElements, label)
+    end
+end
+
+local function hookRemote(remote)
+    if remote:IsA("RemoteEvent") then
+        local originalFireServer = remote.FireServer
+        remote.FireServer = function(self, ...)
+            logRemoteCall(self, "FireServer", ...)
+            return originalFireServer(self, ...)
+        end
+
+        local originalFireClient = remote.FireClient
+        remote.FireClient = function(self, player, ...)
+            logRemoteCall(self, "FireClient", player.Name, ...)
+            return originalFireClient(self, player, ...)
+        end
+    elseif remote:IsA("RemoteFunction") then
+        local originalInvokeServer = remote.InvokeServer
+        remote.InvokeServer = function(self, ...)
+            logRemoteCall(self, "InvokeServer", ...)
+            return originalInvokeServer(self, ...)
+        end
+
+        local originalInvokeClient = remote.InvokeClient
+        remote.InvokeClient = function(self, player, ...)
+            logRemoteCall(self, "InvokeClient", player.Name, ...)
+            return originalInvokeClient(self, player, ...)
+        end
+    end
+end
+
+local function startRemoteSpy()
+    if not RemoteSpySection then return end
+    for _, service in pairs(game:GetChildren()) do
+        for _, remote in pairs(service:GetDescendants()) do
+            if remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction") then
+                hookRemote(remote)
+            end
+        end
+    end
+    game.DescendantAdded:Connect(function(descendant)
+        if descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction") then
+            hookRemote(descendant)
+        end
+    end)
+    RemoteSpySection:CreateLabel({Name = "RemoteSpy Ativo! Monitorando Remotes."})
+end
+
+-- Script Decompiler/Viewer Functions
+local function viewScriptSource(scriptInstance)
+    if not ScriptSourceSection then return end
+    scriptElements = clearSection(ScriptSourceSection, scriptElements)
+
+    local source = "Não foi possível obter o código-fonte." -- Default message
+    local success, scriptContent = pcall(function() return scriptInstance.Source end)
+
+    if success and scriptContent then
+        source = scriptContent
+    elseif syn and syn.decompile then
+        local decompileSuccess, decompiledSource = pcall(function() return syn.decompile(scriptInstance) end)
+        if decompileSuccess and decompiledSource then
+            source = decompiledSource
+        else
+            source = "Falha ao descompilar com syn.decompile: " .. (decompiledSource or "Erro desconhecido")
+        end
+    else
+        source = "Decompilação não suportada ou falhou. Tente com um executor que suporte \'syn.decompile\'."
+    end
+
+    local displaySource = source
+    local maxDisplayLength = 500
+    if #source > maxDisplayLength then
+        displaySource = source:sub(1, maxDisplayLength) .. "\n... (código truncado, muito longo para exibir completamente)"
+    end
+
+    if currentScriptSourceLabel then
+        pcall(function() currentScriptSourceLabel:Destroy() end)
+    end
+
+    currentScriptSourceLabel = ScriptSourceSection:CreateInput({
+        Name = scriptInstance.Name .. " Source",
+        CurrentValue = displaySource,
+        PlaceholderText = "Código-fonte do script",
+        RemoveTextAfterFocusLost = false,
+        -- MultiLine = true, -- Rayfield CreateInput pode não suportar
+        Callback = function(newSource)
+        end
+    })
+    table.insert(scriptElements, currentScriptSourceLabel)
+end
+
+local function updateScriptsList()
+    if not ScriptsListSection then return end
+    scriptElements = clearSection(ScriptsListSection, scriptElements)
+
+    local allScripts = {}
+    for _, descendant in pairs(game:GetDescendants()) do
+        if descendant:IsA("LocalScript") or descendant:IsA("ModuleScript") or descendant:IsA("Script") then
+            table.insert(allScripts, descendant)
+        end
+    end
+
+    if #allScripts > 0 then
+        for _, scriptInstance in ipairs(allScripts) do
+            local scriptButton = ScriptsListSection:CreateButton({
+                Name = scriptInstance.Name .. " (" .. scriptInstance.ClassName .. ")",
+                Callback = function()
+                    viewScriptSource(scriptInstance)
+                end
+            })
+            table.insert(scriptElements, scriptButton)
+        end
+    else
+        ScriptsListSection:CreateLabel({Name = "Nenhum script encontrado."})
+    end
+end
+
+-- Inicialização de elementos da UI
+if SearchSection then
+    searchInput = SearchSection:CreateInput({
+        Name = "Buscar",
+        CurrentValue = "",
+        PlaceholderText = "Nome ou Classe da Instância",
+        Callback = function(text)
+            searchInstances(text)
+        end
+    })
+end
+
+if ExplorerSection then
+    ExplorerSection:CreateButton({
+        Name = "Atualizar Hierarquia",
+        Callback = function()
+            updateHierarchy(currentInstance)
+            updateProperties(currentInstance)
+            updateActions(currentInstance)
+            Rayfield:Notify({
+                Title = "Explorer", Content = "Hierarquia atualizada!", Duration = 2
+            })
+        end
+    })
+end
+
+if ScriptsListSection then
+    ScriptsListSection:CreateButton({
+        Name = "Atualizar Lista de Scripts",
+        Callback = function()
+            updateScriptsList()
+            Rayfield:Notify({
+                Title = "Scripts", Content = "Lista de scripts atualizada!", Duration = 2
+            })
+        end
+    })
+end
+
+if RemoteSpySection then
+    RemoteSpySection:CreateButton({
+        Name = "Limpar Logs",
+        Callback = function()
+            remoteSpyLogs = {}
+            updateRemoteSpyDisplay()
+            Rayfield:Notify({
+                Title = "RemoteSpy", Content = "Logs limpos!", Duration = 2
+            })
+        end
+    })
+end
+
+if SettingsSection then
+    SettingsSection:CreateToggle({
+        Name = "Salvar Configuração",
+        CurrentValue = false, -- Desativado por padrão para evitar problemas
+        Callback = function(value)
+            -- Window.ConfigurationSaving.Enabled = value -- Reativar se necessário
+            Rayfield:Notify({
+                Title = "Configurações", Content = "Salvar Configuração: " .. tostring(value) .. " (Funcionalidade desativada)", Duration = 3
+            })
+        end
+    })
+
+    SettingsSection:CreateButton({
+        Name = "Carregar Configuração",
+        Callback = function()
+            -- Rayfield:LoadConfiguration() -- Reativar se necessário
+            Rayfield:Notify({
+                Title = "Configurações", Content = "Carregar Configuração (Funcionalidade desativada)", Duration = 3
+            })
+        end
+    })
+
+    SettingsSection:CreateButton({
+        Name = "Salvar Configuração Agora",
+        Callback = function()
+            -- Rayfield:SaveConfiguration() -- Reativar se necessário
+            Rayfield:Notify({
+                Title = "Configurações", Content = "Salvar Configuração (Funcionalidade desativada)", Duration = 3
+            })
+        end
+    })
+end
+
+print("[Manus Explorer] Inicializando funcionalidades...")
+updateHierarchy(game)
+updateProperties(game)
+updateActions(game)
+startRemoteSpy()
+updateRemoteSpyDisplay()
+updateScriptsList()
+
+print("[Manus Explorer] Script carregado completamente! Notificando usuário...")
+Rayfield:Notify({
+    Title = "Sucesso",
+    Content = "Manus Explorer carregado com sucesso!",
+    Duration = 5
+})
